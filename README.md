@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+<!-- Copyright (C) 2026 MineAgent -->
+
 # minecraft-mcp-bridge
 
 独立程序：**MCP over stdio**，把本机 Minecraft 客户端模组的共享 HTTP 接口
@@ -115,4 +118,7 @@ DSH 安装目录（用 `DSH_CHECKOUT` 指定，本机没有就自动跳过那一
 
 ## 许可证
 
-GPL-3.0-only，全文见 [LICENSE](LICENSE)。
+- **代码**（`src/`、`bin/`、`test/`、`package.json`）：GPL-3.0-only，见 [LICENSE](LICENSE)
+- **文档**（`README.md`）：CC BY-NC-SA 4.0，见 [LICENSE.CC-BY-NC-SA-4.0](LICENSE.CC-BY-NC-SA-4.0)
+
+两份都要求保留署名；文档许可另外限制商业使用，且衍生文档需同样方式共享。
