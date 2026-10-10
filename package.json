@@ -1,0 +1,39 @@
+{
+  "name": "minecraft-mcp-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "description": "MCP stdio server：把本机 Minecraft 客户端模组的共享 HTTP 接口（mcctl / AdvancedInfoFetcher / Craft Command）暴露成 MCP 工具。",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "author": "MineAgent",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MineAgent/MCPServer.git"
+  },
+  "bin": {
+    "minecraft-mcp-bridge": "./bin/minecraft-mcp-bridge.mjs"
+  },
+  "exports": {
+    ".": "./src/server.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node test/list-tools.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
