@@ -63,12 +63,35 @@ const transport = new StdioClientTransport({
 	stderr: 'pipe',
 });
 
-const client = new Client({ name: 'bridge-selfcheck', version: '0.1.0' });
+const client = new Client({ name: 'bridge-selfcheck', version: pkg.version });
 await client.connect(transport);
 
 const { tools } = await client.listTools();
 console.log(`\n工具 ${tools.length} 个：`);
 for (const tool of tools) console.log(`  - ${tool.name}`);
+
+const EXPECTED_TOOLS = [
+	'baritone',
+	'chat',
+	'control',
+	'cursor',
+	'help',
+	'inventory',
+	'killaura',
+	'op',
+	'player',
+	'request',
+	'screenshot',
+	'sounds',
+	'status',
+	'world',
+];
+const actualTools = tools.map((tool) => tool.name).sort();
+const missingTools = EXPECTED_TOOLS.filter((name) => !actualTools.includes(name));
+const extraTools = actualTools.filter((name) => !EXPECTED_TOOLS.includes(name));
+if (missingTools.length > 0) fail(`缺少工具：${missingTools.join(', ')}`);
+if (extraTools.length > 0) fail(`多出未预期的工具：${extraTools.join(', ')}`);
+if (actualTools.length !== EXPECTED_TOOLS.length) fail(`工具数应为 ${EXPECTED_TOOLS.length}，实际 ${actualTools.length}`);
 
 let assertSupportedJsonSchema;
 try {
@@ -104,6 +127,21 @@ console.log('\n调用 control（缺参数应被 schema 拒绝）：');
 const bad = await client.callTool({ name: 'control', arguments: {} });
 console.log(JSON.stringify(bad).slice(0, 300));
 if (bad.isError !== true) fail('[control] 缺参数没有被拒绝');
+
+/** 调一次工具并断言得到可读的 isError。 */
+async function expectToolError(name, args, label) {
+	const result = await client.callTool({ name, arguments: args });
+	console.log(`\n调用 ${name}（${label}）：`);
+	console.log(JSON.stringify(result).slice(0, 300));
+	if (result.isError !== true) fail(`[${name}] ${label}没有被拒绝`);
+}
+
+await expectToolError('request', {}, '缺 endpoint');
+await expectToolError('request', { endpoint: 'ka/state' }, 'endpoint 不是 / 开头');
+await expectToolError('request', { endpoint: '/', method: 'GET', body: 'x' }, 'GET 带 body');
+await expectToolError('request', { endpoint: '/', headers: ['nope'] }, 'headers 格式错误');
+await expectToolError('baritone', {}, '缺 command');
+await expectToolError('killaura', {}, '缺 action');
 
 await client.close();
 console.log(failed === 0 ? '\n自检通过。' : `\n自检失败 ${failed} 项。`);

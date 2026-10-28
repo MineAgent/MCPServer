@@ -6,9 +6,11 @@
  * 把 `.minecraft/mods/` 里几个客户端模组挂在共享 HTTP 服务（默认
  * `http://127.0.0.1:3420`）上的接口，映射成 MCP 工具：
  *
- *   /ctl  mcctl               控制：按键 / 鼠标 / 视角 / 截图 / Baritone / 聊天 / 打字
- *   /aif  AdvancedInfoFetcher 只读状态：坐标 / 背包 / 聊天 / 声音 / 世界
+ *   /ctl  mcctl               控制：按键 / 鼠标 / 视角 / 截图 / 聊天 / 打字
+ *   /aif  AdvancedInfoFetcher 只读状态：坐标 / 目标方块 / 背包 / 聊天 / 声音 / 世界
  *   /op   Craft Command       容器操作：合成 / 熔炉 / 箱子 / 快捷栏 / 转向
+ *   /bt   MGBaritoneConnector Baritone 命令
+ *   /ka   Kill Aura          Kill Aura 开关与配置
  *
  * 本进程不碰游戏，只做 HTTP 桥接；游戏没开时工具返回可读的错误。
  * 这是一个独立程序：只依赖本包自己的依赖，任何 MCP 客户端都能通过 stdio 启动它。
@@ -26,7 +28,7 @@ export const DEFAULT_BASE_URL = 'http://127.0.0.1:3420';
 export const SERVER_INFO = Object.freeze({
 	name: 'minecraft-client-bridge',
 	title: 'Minecraft 客户端控制桥',
-	version: '0.2.0',
+	version: '0.3.0',
 });
 
 /** 归一化服务地址：去空白、去末尾斜杠。 */
@@ -41,19 +43,38 @@ const TIMEOUT = {
 	screenshot: 20_000,
 	control: 150_000,
 	op: 180_000,
+	baritone: 15_000,
+	killaura: 15_000,
+	request: 30_000,
 };
+
+/** 通用兜底请求允许的最大超时与响应体大小。 */
+const REQUEST_MAX_TIMEOUT = 180_000;
+const REQUEST_MAX_BYTES = 8 * 1024 * 1024;
 
 /** HTTP 状态码的中文含义（模组自己的错误正文会附在后面）。 */
 const STATUS_HINT = {
 	400: '请求被拒',
+	401: '未授权',
+	403: '禁止访问',
 	404: '路径不存在',
 	405: '方法不允许',
 	409: '客户端没在世界里',
 	413: '请求体过大',
+	429: '请求太频繁',
 	500: '模组内部错误',
 	503: '无法排队',
 	504: '等客户端超时',
 };
+
+/** 共享 HTTP 服务上已知的前缀；status 与 help 用它保持顺序一致。 */
+const PREFIXES = [
+	{ key: 'ctl', label: '/ctl 控制' },
+	{ key: 'aif', label: '/aif 只读状态' },
+	{ key: 'op', label: '/op 容器操作' },
+	{ key: 'bt', label: '/bt Baritone' },
+	{ key: 'ka', label: '/ka Kill Aura' },
+];
 
 /** 桥接层自身的失败（连不上、超时、非 200）；正文直接给模型看。 */
 class BridgeError extends Error {}
@@ -63,20 +84,29 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * 造一个绑定到某个服务地址的请求函数，失败时抛出带中文说明的 {@link BridgeError}。
  *
+ * 返回的函数带一个 `raw` 属性：它只做传输，不把非 2xx 当异常，供通用 `request`
+ * 工具读取状态码与响应体。
+ *
  * @param {string} baseUrl 形如 `http://127.0.0.1:3420` 的根地址
- * @returns {(path: string, options?: {method?: string, body?: string, timeoutMs?: number, binary?: boolean}) => Promise<string|Buffer>}
- *   发起请求；`binary` 为真时返回 Buffer，否则返回文本
+ * @returns {((path: string, options?: {method?: string, body?: string, headers?: Record<string, string>, timeoutMs?: number, binary?: boolean}) => Promise<string|Buffer>) & {
+ *   raw: (path: string, options?: {method?: string, body?: string, headers?: Record<string, string>, timeoutMs?: number}) => Promise<Response>
+ * }}
  */
 function makeRequest(baseUrl) {
-	return async function request(path, options = {}) {
-		const { method = 'GET', body, timeoutMs = TIMEOUT.read, binary = false } = options;
+	/** 只负责发请求；网络错误与超时统一转成 BridgeError。 */
+	async function fetchResponse(path, options = {}) {
+		const { method = 'GET', body, headers, timeoutMs = TIMEOUT.read } = options;
 		const url = baseUrl + path;
+		const requestHeaders = {
+			...(body === undefined ? {} : { 'content-type': 'text/plain; charset=utf-8' }),
+			...headers,
+		};
 
-		let response;
 		try {
-			response = await fetch(url, {
+			return await fetch(url, {
 				method,
-				...(body === undefined ? {} : { body, headers: { 'content-type': 'text/plain; charset=utf-8' } }),
+				...(body === undefined ? {} : { body }),
+				...(Object.keys(requestHeaders).length === 0 ? {} : { headers: requestHeaders }),
 				signal: AbortSignal.timeout(timeoutMs),
 			});
 		} catch (error) {
@@ -90,16 +120,54 @@ function makeRequest(baseUrl) {
 				`连不上 ${url}：Minecraft 客户端没在运行，或 MGHttpdProvider 没加载。（${cause}）`,
 			);
 		}
+	}
 
+	const request = async function request(path, options = {}) {
+		const response = await fetchResponse(path, options);
 		if (!response.ok) {
 			const detail = (await response.text().catch(() => '')).trim();
-			const hint = STATUS_HINT[response.status] ?? '';
-			throw new BridgeError(`HTTP ${response.status}${hint ? ` ${hint}` : ''}${detail ? `：${detail}` : ''}`);
+			throw httpError(response.status, detail);
 		}
-
-		if (binary) return Buffer.from(await response.arrayBuffer());
+		if (options.binary) return Buffer.from(await response.arrayBuffer());
 		return await response.text();
 	};
+
+	request.raw = (path, options) => fetchResponse(path, options);
+	return request;
+}
+
+/** 把非 2xx 响应整理成一句给模型看的 BridgeError。 */
+function httpError(status, detail) {
+	const hint = STATUS_HINT[status] ?? '';
+	return new BridgeError(`HTTP ${status}${hint ? ` ${hint}` : ''}${detail ? `：${detail}` : ''}`);
+}
+
+/** 尽量把 JSON 响应排版，解析不了就原样返回。 */
+function prettyJson(text) {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return text;
+	try {
+		return JSON.stringify(JSON.parse(trimmed), null, 2);
+	} catch {
+		return text;
+	}
+}
+
+/** 解析通用请求的 `Name: value` 头；格式不对时给模型一句可读的错误。 */
+function parseHeaderLines(lines) {
+	const headers = {};
+	for (const line of lines) {
+		const index = line.indexOf(':');
+		if (index <= 0) throw new BridgeError(`headers 里的 ${JSON.stringify(line)} 不是 "Name: value" 形式。`);
+		const name = line.slice(0, index).trim();
+		const value = line.slice(index + 1).trim();
+		if (name.length === 0) throw new BridgeError(`headers 里的 ${JSON.stringify(line)} 缺少头名称。`);
+		if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+			throw new BridgeError(`headers 里的头名称 ${JSON.stringify(name)} 含有非法字符。`);
+		}
+		headers[name] = value;
+	}
+	return headers;
 }
 
 /**
@@ -158,14 +226,16 @@ function pngSize(buffer) {
 /** 服务端 instructions：随 initialize 返回，宿主会把它并入系统提示词。 */
 const instructionsFor = (baseUrl) => `本桥控制本机 Minecraft 客户端（窗口 854×480、guiScale=2），游戏侧接口在 ${baseUrl}。
 
-观测：player（坐标/朝向/生命/饱食）、inventory、world、chat、sounds、screenshot、cursor。
-操作：control（按键/鼠标/视角/Baritone/聊天/打字）、op（合成/熔炉/箱子/快捷栏/转向）。
+观测：player（坐标/朝向/生命/饱食/准星目标方块/光照）、inventory、world、chat、sounds、screenshot、cursor。
+操作：control（按键/鼠标/视角/聊天/打字）、op（合成/熔炉/箱子/快捷栏/转向）、baritone（Baritone 命令）、killaura（Kill Aura 开关与配置）。
+兜底：request 可以直接调用任意以 / 开头的 endpoint；新接口先 help 看说明，再用它。
 
 1. 一次只做一个动作，做完立刻用 player / inventory 对账；不确定刚才发生了什么就读 chat 与 sounds。
 2. chat 与 sounds 是「读取即清空」的增量回显：指令输出、Baritone 输出、报错、关键声音都在里面，别靠截图猜结果。
 3. GUI 优先用 op（精确、有结果）；手点鼠标只是兜底：先 screenshot 看界面，再 cursor 取坐标，最后用 control 的 \`mouse goto <x> <y>\`。
-4. 命令被拒时返回的是原文原因（原料不足 / 没打开界面 / 配方未解锁 / 没有聚焦文本框），按原因补救。
-5. 服务不通、模组缺失或刚启动游戏：先跑 status；语法细节用 help。`;
+4. Baritone 命令用 baritone（不再走 control）；输出仍然在聊天栏，用 chat 读。
+5. 命令被拒时返回的是原文原因（原料不足 / 没打开界面 / 配方未解锁 / 没有聚焦文本框），按原因补救。
+6. 服务不通、模组缺失或刚启动游戏：先跑 status；语法细节用 help。`;
 
 /**
  * 建一个 MCP server 实例并注册全部工具。每次连接调一次（SDK 的工厂约定），
@@ -190,19 +260,19 @@ export function createServer(options = {}) {
 		{
 			title: '自检：服务与接口',
 			description:
-				'检查控制服务是否在跑、/ctl（控制）、/aif（只读状态）、/op（容器操作）三个接口各是否挂载、客户端是否已进入世界，并给出接口索引。刚启动游戏或任何调用异常时先跑它。',
+				'检查控制服务是否在跑、/ctl（控制）、/aif（只读状态）、/op（容器操作）、/bt（Baritone）、/ka（Kill Aura）五个接口各是否挂载、客户端是否已进入世界，并给出接口索引。刚启动游戏或任何调用异常时先跑它。',
 			inputSchema: inputSchema(z.object({})),
 			annotations: readOnly,
 		},
 		tool(async () => {
 			const index = await request('/', { timeoutMs: 5_000 });
 			const mounted = {};
-			for (const prefix of ['ctl', 'aif', 'op']) {
+			for (const { key } of PREFIXES) {
 				try {
-					await request(`/${prefix}/`, { method: 'HEAD', timeoutMs: 5_000 });
-					mounted[prefix] = true;
+					await request(`/${key}/`, { method: 'HEAD', timeoutMs: 5_000 });
+					mounted[key] = true;
 				} catch {
-					mounted[prefix] = false;
+					mounted[key] = false;
 				}
 			}
 
@@ -220,9 +290,7 @@ export function createServer(options = {}) {
 				[
 					`服务：${baseUrl} 可连接`,
 					`世界：${world}`,
-					`/ctl 控制：${mounted.ctl ? '可用' : '不可用'}`,
-					`/aif 只读状态：${mounted.aif ? '可用' : '不可用'}`,
-					`/op 容器操作：${mounted.op ? '可用' : '不可用'}`,
+					...PREFIXES.map(({ key, label }) => `${label}：${mounted[key] ? '可用' : '不可用'}`),
 					'',
 					'接口索引：',
 					index.trim(),
@@ -236,10 +304,12 @@ export function createServer(options = {}) {
 		{
 			title: '接口说明书',
 			description:
-				'返回某个接口的权威完整说明（游戏内模组自带的帮助文本）。语法、按键名、返回码与限制都以它为准。',
+				'返回某个接口的权威完整说明（游戏内模组自带的帮助文本）。语法、按键名、返回码与限制都以它为准。新接口先用它看用法。',
 			inputSchema: inputSchema(
 				z.object({
-					prefix: z.enum(['ctl', 'aif', 'op']).describe('ctl=控制命令；aif=只读状态；op=容器操作'),
+					prefix: z
+						.enum(['ctl', 'aif', 'op', 'bt', 'ka'])
+						.describe('ctl=控制命令；aif=只读状态；op=容器操作；bt=Baritone 命令；ka=Kill Aura'),
 				}),
 			),
 			annotations: readOnly,
@@ -251,7 +321,8 @@ export function createServer(options = {}) {
 		'player',
 		{
 			title: '玩家状态',
-			description: '坐标、朝向（yaw/pitch）、生命、饱食、经验、状态效果，纯文本。',
+			description:
+				'坐标、朝向（yaw/pitch）、生命、饱食、经验、状态效果，以及准星指向的目标方块和它的光照，纯文本。放置/挖掘/右键前先看目标方块；`未选中` 表示准星不在方块上。',
 			inputSchema: inputSchema(z.object({})),
 			annotations: readOnly,
 		},
@@ -351,15 +422,15 @@ export function createServer(options = {}) {
 	server.registerTool(
 		'control',
 		{
-			title: '注入输入（按键/鼠标/Baritone/聊天）',
+			title: '注入输入（按键/鼠标/聊天）',
 			description:
-				'把一段输入序列交给游戏，走原版输入管线执行（不抢真实键鼠）。多行或用 `;` 分隔，严格按顺序执行。按键/鼠标这类定时动作是排队的，命令一被接受就返回，用 waitMs 等它做完。含 `bt`/`#` 需要装了 Baritone，含 `type`/`typeEnter` 需要当前有聚焦的文本框，否则整个请求失败、什么都不执行。',
+				'把一段输入序列交给游戏，走原版输入管线执行（不抢真实键鼠）。多行或用 `;` 分隔，严格按顺序执行。按键/鼠标这类定时动作是排队的，命令一被接受就返回，用 waitMs 等它做完。含 `type`/`typeEnter` 需要当前有聚焦的文本框，否则整个请求失败、什么都不执行。Baritone 命令改用 `baritone` 工具，不再走这里。',
 			inputSchema: inputSchema(
 				z.object({
 					command: z
 						.string()
 						.describe(
-							'mcctl 命令文本，不能为空。常用：`W 500` 按住 W 500ms（默认 50）；`W+Ctrl 100` 同时按住多键；`mouse left|right|mid [ms]`；`mouse move <dx> <dy>` 相对移动（+右 +下）；`mouse goto <x> <y>` 移到窗口像素坐标；`mouse scroll <n>`；`delay <ms> <命令>`；`release` 立刻松开全部；`bt <命令>` 或 `#<命令>` 执行 Baritone；`chat <文本>` 发聊天（`/` 开头当指令）；`type <文本>` 打进聚焦文本框（`\\n` 表示回车）；`typeEnter` 在文本框里回车。按键名不分大小写：A–Z、0–9、F1–F12、SPACE/TAB/ENTER/BACKSPACE/ESC/UP/DOWN/LEFT/RIGHT 等；单次时长与 delay 上限 600000ms。完整语法用 help。',
+							'mcctl 命令文本，不能为空。常用：`W 500` 按住 W 500ms（默认 50）；`W+Ctrl 100` 同时按住多键；`mouse left|right|mid [ms]`；`mouse move <dx> <dy>` 相对移动（+右 +下）；`mouse goto <x> <y>` 移到窗口像素坐标；`mouse scroll <n>`；`delay <ms> <命令>`；`release` 立刻松开全部；`chat <文本>` 发聊天（`/` 开头当指令）；`type <文本>` 打进聚焦文本框（`\\n` 表示回车）；`typeEnter` 在文本框里回车。按键名不分大小写：A–Z、0–9、F1–F12、SPACE/TAB/ENTER/BACKSPACE/ESC/UP/DOWN/LEFT/RIGHT 等；单次时长与 delay 上限 600000ms。完整语法用 help。',
 						),
 					waitMs: z
 						.number()
@@ -407,6 +478,197 @@ export function createServer(options = {}) {
 			if (command.trim().length === 0) throw new BridgeError('命令不能为空。');
 			const text = (await request('/op/', { method: 'POST', body: command, timeoutMs: TIMEOUT.op })).trim();
 			return textResult(text);
+		}),
+	);
+
+	server.registerTool(
+		'baritone',
+		{
+			title: 'Baritone 命令',
+			description:
+				'执行一条 Baritone 命令（寻路 / 自动采集 / 停止）。等价于聊天框里的 `#<命令>`，但不发聊天包；一次只能一条。命令输出仍在聊天栏，用 chat 读取。含 `bt` 或 `#` 前缀也接受。',
+			inputSchema: inputSchema(
+				z.object({
+					command: z
+						.string()
+						.describe(
+							'一条 Baritone 命令，不能为空。常用：`goal <x> <y> <z>` 或 `goal ~ ~ ~20`；`goto <x> <y> <z>`；`mine <方块id>`；`stop`；`proc`。完整语法用 help({prefix:"bt"})。',
+						),
+					waitMs: z
+						.number()
+						.optional()
+						.describe('命令被接受后等待这么久（毫秒，整数，0–60000，默认 0）再返回；Baritone 的进度仍要用 chat / player 对账'),
+				}),
+			),
+		},
+		tool(async ({ command, waitMs = 0 }) => {
+			const text = String(command ?? '').trim();
+			if (text.length === 0) throw new BridgeError('命令不能为空。');
+			const wait = Math.min(Math.max(Math.trunc(waitMs), 0), 60_000);
+			const body = await request('/bt/', { method: 'POST', body: text, timeoutMs: TIMEOUT.baritone });
+			let summary = body.trim();
+			if (wait > 0) {
+				await sleep(wait);
+				summary += `\n已等待 ${wait}ms。`;
+			}
+			return textResult(summary);
+		}),
+	);
+
+	server.registerTool(
+		'killaura',
+		{
+			title: 'Kill Aura 开关与配置',
+			description:
+				'读取或修改 Kill Aura：`state` 看当前状态与目标；`on` / `off` / `toggle` 开关（幂等）；`reload` 重新读取 config/killaura.json；`config` 按给出的字段部分更新配置。所有写操作都返回完整状态 JSON。开关状态不持久化，重启游戏后是关闭的。',
+			inputSchema: inputSchema(
+				z.object({
+					action: z
+						.enum(['state', 'on', 'off', 'toggle', 'reload', 'config'])
+						.describe('state=读状态；on/off/toggle=开关；reload=重读配置文件；config=按 config 对象更新配置'),
+					config: z
+						.object({
+							range: z.number().optional(),
+							fov: z.number().optional(),
+							minAttackCharge: z.number().optional(),
+							rotation: z.enum(['silent', 'visible', 'none']).optional(),
+							priority: z.enum(['closest', 'lowestHealth', 'health', 'angle']).optional(),
+							targetPlayers: z.boolean().optional(),
+							targetHostile: z.boolean().optional(),
+							targetPassive: z.boolean().optional(),
+							targetArmorStands: z.boolean().optional(),
+							ignoreInvisible: z.boolean().optional(),
+							throughWalls: z.boolean().optional(),
+							pauseInScreens: z.boolean().optional(),
+							pauseWhileUsingItem: z.boolean().optional(),
+						})
+						.optional()
+						.describe(
+							'仅 action=config 时使用：只改出现的字段（range 0.5–6.0、fov 1–360、minAttackCharge 0–1）；任一字段非法时整个请求 400、文件不改',
+						),
+				}),
+			),
+		},
+		tool(async ({ action, config }) => {
+			if (action === 'config') {
+				if (config === undefined || Object.keys(config).length === 0) {
+					throw new BridgeError('action=config 至少要给一个 config 字段。');
+				}
+				const body = await request('/ka/config', {
+					method: 'POST',
+					body: JSON.stringify(config),
+					headers: { 'content-type': 'application/json' },
+					timeoutMs: TIMEOUT.killaura,
+				});
+				return textResult(prettyJson(body.trim()));
+			}
+
+			if (config !== undefined) throw new BridgeError('config 只能和 action=config 一起用。');
+			const body = await request(action === 'state' ? '/ka/state' : `/ka/${action}`, {
+				method: action === 'state' ? 'GET' : 'POST',
+				timeoutMs: TIMEOUT.killaura,
+			});
+			return textResult(prettyJson(body.trim()));
+		}),
+	);
+
+	server.registerTool(
+		'request',
+		{
+			title: '兜底 HTTP 请求',
+			description:
+				'直接调用游戏侧共享 HTTP 服务上任意以 / 开头的 endpoint，供以后新增、尚未封装成专用工具的接口使用。有专用工具（status/help/player/baritone/killaura/control/op 等）时优先用专用工具。endpoint 必须是相对路径，不能是完整 URL；非 2xx 会以 isError 返回状态码与模组原文。',
+			inputSchema: inputSchema(
+				z.object({
+					endpoint: z
+						.string()
+						.describe('相对路径，必须以 / 开头，可带 query，例如 `/ka/state`、`/bt/`、`/aif/info`。不要写协议或主机名。'),
+					method: z
+						.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
+						.optional()
+						.describe('HTTP 方法，默认 GET'),
+					body: z.string().optional().describe('原样请求体；GET/HEAD 不能带 body'),
+					headers: z
+						.array(z.string())
+						.optional()
+						.describe('额外的请求头，每项写成 `Name: value`；例如 ["Accept: application/json"]'),
+					contentType: z
+						.string()
+						.optional()
+						.describe('带 body 且 headers 没指定 content-type 时使用，默认 text/plain; charset=utf-8'),
+					timeoutMs: z.number().optional().describe('超时（毫秒，默认 30000，夹到 1000–180000）'),
+					responseType: z
+						.enum(['auto', 'text', 'image', 'base64'])
+						.optional()
+						.describe('auto（默认）按 content-type 自动识别图片；text 强制文本；image 强制图片；base64 返回原始字节的 base64'),
+				}),
+			),
+		},
+		tool(async ({ endpoint, method, body, headers, contentType, timeoutMs, responseType = 'auto' }) => {
+			const path = String(endpoint ?? '').trim();
+			if (!path.startsWith('/')) {
+				throw new BridgeError('endpoint 必须以 / 开头（例如 `/ka/state`），不能写完整 URL 或主机名。');
+			}
+
+			const verb = String(method ?? 'GET').trim().toUpperCase();
+			const allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+			if (!allowedMethods.includes(verb)) {
+				throw new BridgeError(`method 必须是 ${allowedMethods.join('/')} 之一。`);
+			}
+			if (body !== undefined && (verb === 'GET' || verb === 'HEAD')) {
+				throw new BridgeError(`${verb} 请求不能带 body。`);
+			}
+
+			const requestHeaders = parseHeaderLines(headers ?? []);
+			const hasContentType = Object.keys(requestHeaders).some((name) => name.toLowerCase() === 'content-type');
+			if (body !== undefined && !hasContentType) {
+				requestHeaders['content-type'] = contentType ?? 'text/plain; charset=utf-8';
+			}
+
+			const rawTimeout = Number.isFinite(timeoutMs) ? timeoutMs : TIMEOUT.request;
+			const timeout = Math.min(Math.max(Math.trunc(rawTimeout), 1_000), REQUEST_MAX_TIMEOUT);
+
+			const response = await request.raw(path, { method: verb, body, headers: requestHeaders, timeoutMs: timeout });
+			const declaredLength = Number(response.headers.get('content-length'));
+			if (Number.isFinite(declaredLength) && declaredLength > REQUEST_MAX_BYTES) {
+				throw new BridgeError(`响应过大（${declaredLength} 字节，上限 ${REQUEST_MAX_BYTES}）。`);
+			}
+
+			const bytes = Buffer.from(await response.arrayBuffer());
+			if (bytes.length > REQUEST_MAX_BYTES) {
+				throw new BridgeError(`响应过大（${bytes.length} 字节，上限 ${REQUEST_MAX_BYTES}）。`);
+			}
+
+			const type = (response.headers.get('content-type') ?? '').trim();
+			const statusLine = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
+
+			if (!response.ok) {
+				const hint = STATUS_HINT[response.status] ?? '';
+				const detail = bytes.toString('utf8').trim();
+				const lines = [`${statusLine}${hint ? ` ${hint}` : ''}`];
+				if (type.length > 0) lines.push(`content-type: ${type}`);
+				lines.push('', detail.length > 0 ? detail : '(空响应)');
+				return { isError: true, content: [{ type: 'text', text: lines.join('\n') }] };
+			}
+
+			const isImage = type.toLowerCase().startsWith('image/');
+			if (responseType === 'image' && !isImage) {
+				throw new BridgeError(`响应不是图片（content-type: ${type || '未提供'}）。`);
+			}
+			if (responseType === 'base64') {
+				return textResult(bytes.toString('base64'));
+			}
+			if (responseType === 'image' || (responseType === 'auto' && isImage)) {
+				return {
+					content: [
+						{ type: 'image', data: bytes.toString('base64'), mimeType: type.split(';')[0].trim() || 'application/octet-stream' },
+						{ type: 'text', text: `${statusLine}，${bytes.length} 字节${type ? `（${type}）` : ''}` },
+					],
+				};
+			}
+
+			const text = bytes.toString('utf8');
+			return textResult(text.length > 0 ? text : `${statusLine}（空响应）`);
 		}),
 	);
 

@@ -1,8 +1,8 @@
 {
   "name": "minecraft-mcp-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "MCP stdio server：把本机 Minecraft 客户端模组的共享 HTTP 接口（mcctl / AdvancedInfoFetcher / Craft Command）暴露成 MCP 工具。",
+  "description": "MCP stdio server：把本机 Minecraft 客户端模组的共享 HTTP 接口（mcctl / AdvancedInfoFetcher / Craft Command / MGBaritoneConnector / Kill Aura）暴露成 MCP 工具。",
   "type": "module",
   "license": "GPL-3.0-only",
   "author": "MineAgent",

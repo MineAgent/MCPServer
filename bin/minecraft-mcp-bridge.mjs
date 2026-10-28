@@ -30,7 +30,8 @@ const USAGE = `minecraft-mcp-bridge ${pkg.version} — 用 MCP over stdio 控制
   本程序只做 HTTP 桥接，不启动游戏。stdin/stdout 是 MCP 协议通道，
   日志一律走 stderr。游戏没在跑时，工具返回一句可读的错误文本。
   游戏侧需要 .minecraft/mods 里加载共享 HTTP 服务的模组：
-  httpdprovider + mcctl + advanced-info-fetch + craftcmd。
+  httpdprovider + mcctl + advanced-info-fetch + craftcmd；
+  Baritone 命令另需 mgbaritoneconnector + baritone，Kill Aura 另需 killaura。
 `;
 
 /**
