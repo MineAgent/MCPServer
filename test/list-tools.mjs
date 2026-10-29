@@ -146,6 +146,7 @@ await expectToolError('request', { endpoint: '/', method: 'GET', body: 'x' }, 'G
 await expectToolError('request', { endpoint: '/', headers: ['nope'] }, 'headers 格式错误');
 await expectToolError('baritone', {}, '缺 command');
 await expectToolError('killaura', {}, '缺 action');
+await expectToolError('killaura', { action: 'config' }, 'config 缺字段');
 
 await client.close();
 console.log(failed === 0 ? '\n自检通过。' : `\n自检失败 ${failed} 项。`);

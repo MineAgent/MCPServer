@@ -28,7 +28,7 @@ export const DEFAULT_BASE_URL = 'http://127.0.0.1:3420';
 export const SERVER_INFO = Object.freeze({
 	name: 'minecraft-client-bridge',
 	title: 'Minecraft 客户端控制桥',
-	version: '0.3.0',
+	version: '0.3.1',
 });
 
 /** 归一化服务地址：去空白、去末尾斜杠。 */
@@ -520,7 +520,7 @@ export function createServer(options = {}) {
 		{
 			title: 'Kill Aura 开关与配置',
 			description:
-				'读取或修改 Kill Aura：`state` 看当前状态与目标；`on` / `off` / `toggle` 开关（幂等）；`reload` 重新读取 config/killaura.json；`config` 按给出的字段部分更新配置。所有写操作都返回完整状态 JSON。开关状态不持久化，重启游戏后是关闭的。',
+				'读取或修改 Kill Aura：`state` 看当前状态与目标；`on` / `off` / `toggle` 开关（幂等）；`reload` 重新读取 config/killaura.json；`config` 按给出的字段部分更新配置。目标按敌意 / 中立 / 友善有掉落 / 友善无掉落分类，可用 denyTargets 拒绝、alwaysTargetsHigh/Medium/Low/Lowest 四档强制。所有写操作都返回完整状态 JSON。开关状态不持久化，重启游戏后是关闭的。',
 			inputSchema: inputSchema(
 				z.object({
 					action: z
@@ -534,8 +534,14 @@ export function createServer(options = {}) {
 							rotation: z.enum(['silent', 'visible', 'none']).optional(),
 							priority: z.enum(['closest', 'lowestHealth', 'health', 'angle']).optional(),
 							targetPlayers: z.boolean().optional(),
-							targetHostile: z.boolean().optional(),
-							targetPassive: z.boolean().optional(),
+							attackHostile: z.boolean().optional(),
+							attackFriendlyDrops: z.boolean().optional(),
+							attackFriendlyNoDrops: z.boolean().optional(),
+							denyTargets: z.array(z.string()).optional(),
+							alwaysTargetsHigh: z.array(z.string()).optional(),
+							alwaysTargetsMedium: z.array(z.string()).optional(),
+							alwaysTargetsLow: z.array(z.string()).optional(),
+							alwaysTargetsLowest: z.array(z.string()).optional(),
 							targetArmorStands: z.boolean().optional(),
 							ignoreInvisible: z.boolean().optional(),
 							throughWalls: z.boolean().optional(),
@@ -544,7 +550,7 @@ export function createServer(options = {}) {
 						})
 						.optional()
 						.describe(
-							'仅 action=config 时使用：只改出现的字段（range 0.5–6.0、fov 1–360、minAttackCharge 0–1）；任一字段非法时整个请求 400、文件不改',
+							'仅 action=config 时使用：只改出现的字段（range 0.5–6.0、fov 1–360、minAttackCharge 0–1）；实体 ID 数组元素可省略 minecraft: 前缀；任一字段非法时整个请求 400、文件不改。旧字段 targetHostile / targetPassive / alwaysTargets 已移除。',
 						),
 				}),
 			),

@@ -88,7 +88,7 @@ npm i -g .            # 之后可直接 minecraft-mcp-bridge
 | `control` | `POST /ctl/` | 按键 / 鼠标 / 视角 / `chat` / `type`（不再含 `bt`） |
 | `op` | `POST /op/` | `craft` / `inventory` / `furnace` / `chest` / `look` |
 | `baritone` | `POST /bt/` | 一条 Baritone 命令，输出仍在聊天栏；`waitMs` 可等一会儿 |
-| `killaura` | `GET /ka/state`、`POST /ka/{on,off,toggle,reload,config}` | 状态 / 开关 / 重读配置 / JSON patch 配置 |
+| `killaura` | `GET /ka/state`、`POST /ka/{on,off,toggle,reload,config}` | 状态 / 开关 / 重读配置 / JSON patch 配置（含 `denyTargets` 与四档 `alwaysTargets*`） |
 | `request` | 任意以 `/` 开头的 endpoint | 兜底 HTTP 调用，供以后新增接口使用 |
 
 `control` 的 `waitMs`（0–60000）在命令被接受后再等一会儿才返回，
