@@ -23,8 +23,8 @@ const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
 
 /** DSH 安装目录：只用来拿它的 schema 子集校验器，拿不到就跳过那一步。 */
-const DSH_CHECKOUT = process.env.DSH_CHECKOUT ?? '/home/DSH/.npm/_npx/1e7f6d9597241db0/node_modules';
-const DSH_TOOLS = `${DSH_CHECKOUT}/@deepseek-ai/dsh-tools/lib/index.js`;
+const DSH_CHECKOUT = process.env.DSH_CHECKOUT ?? '';
+const DSH_TOOLS = DSH_CHECKOUT === '' ? '' : `${DSH_CHECKOUT}/@deepseek-ai/dsh-tools/lib/index.js`;
 
 let failed = 0;
 const fail = (message) => {
@@ -94,10 +94,14 @@ if (extraTools.length > 0) fail(`多出未预期的工具：${extraTools.join(',
 if (actualTools.length !== EXPECTED_TOOLS.length) fail(`工具数应为 ${EXPECTED_TOOLS.length}，实际 ${actualTools.length}`);
 
 let assertSupportedJsonSchema;
-try {
-	({ assertSupportedJsonSchema } = await import(DSH_TOOLS));
-} catch (error) {
-	console.warn(`未找到 DSH 的 dsh-tools，跳过 schema 子集校验（${error.message}）`);
+if (DSH_TOOLS === '') {
+	console.warn('未设置 DSH_CHECKOUT，跳过 schema 子集校验。');
+} else {
+	try {
+		({ assertSupportedJsonSchema } = await import(DSH_TOOLS));
+	} catch (error) {
+		console.warn(`未找到 DSH 的 dsh-tools，跳过 schema 子集校验（${error.message}）`);
+	}
 }
 
 for (const tool of tools) {

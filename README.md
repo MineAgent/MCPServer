@@ -18,7 +18,7 @@
 
 ## 要求
 
-- Node.js ≥ 20（本机 `/usr/bin/node`）
+- Node.js ≥ 20（`/usr/bin/env node` 能找到的版本即可）
 - 游戏侧：`.minecraft/mods` 里加载 `httpdprovider` + `mcctl` +
   `advanced-info-fetch` + `craftcmd`，共享服务监听 `127.0.0.1:3420`
   （服务起来后游戏窗口标题会带 ` - 3420`）
@@ -58,12 +58,16 @@ npm i -g .            # 之后可直接 minecraft-mcp-bridge
 {
   "mcpServers": {
     "minecraft": {
-      "command": "/usr/bin/node",
-      "args": ["/path/to/MCPServer/bin/minecraft-mcp-bridge.mjs"]
+      "command": "/usr/bin/env",
+      "args": ["node", "/path/to/MCPServer/bin/minecraft-mcp-bridge.mjs"]
     }
   }
 }
 ```
+
+`command` 和 `args` 是直接 exec 的，不经过 shell，所以 `/usr/bin/env node` 必须拆成
+`command` 加第一个参数两段；写成 `"command": "/usr/bin/env node"` 会被当成一个不存在的
+可执行文件。
 
 在 DSH 里，它由 `@deepseek-ai/dsh-mcp-client` 以 `serverName: minecraft` 启动，
 工具名就是 `mcp__minecraft__*`。
